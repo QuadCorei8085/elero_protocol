@@ -1,5 +1,5 @@
-# elero_protocol
-elerol 868 radio protocol
+# elero protocol
+elero 868 radio protocol
 
 When you switch on the remote it loads the config found in C file.
 
