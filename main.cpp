@@ -10,9 +10,137 @@
 #define SIGNAL_CLEAR_CHANNEL_ASSESMENT	CC1101_GDO0
 #define SYNCWORD_DET_SENT_TX_SENT		CC1101_GDO2
 
-static const int spiClk = 4000000;
+static const int spiClk = 500000;
 byte address = 0x00;
 SPIClass * hspi = NULL;
+
+static const uint8_t flash_table_encode[] = {0x08, 0x02, 0x0d, 0x01, 0x0f, 0x0e, 0x07, 0x05, 0x09, 0x0c, 0x00, 0x0a, 0x03, 0x04, 0x0b, 0x06};
+
+static uint8_t gIndex = 0x60;
+static uint16_t gCode = (0x00 - (gIndex * 0x708F)) & 0xFFFF;
+
+static uint8_t msg_buffer[64];
+
+static void print_msg(uint8_t* msg)
+{
+	uint8_t i;
+
+	for( i = 0; i < 8 ; i++ )
+	{
+		Serial.printf("0x%02X ", msg[i]);
+	}
+}
+
+static uint8_t count_bits(uint8_t byte)
+{
+	uint8_t i;
+	uint8_t ones = 0;
+	uint8_t mask = 1;
+
+	for( i = 0; i < 8; i++ )
+	{
+		if( mask & byte )
+		{
+			ones += 1;
+		}
+
+		mask <<= 1;
+	}
+
+	return ones & 0x01;
+}
+
+static void calc_parity(uint8_t* msg)
+{
+	uint8_t i;
+    uint8_t p = 0;
+
+    for( i = 0; i < 4; i++ )
+    {
+        uint8_t a = count_bits( msg[0 + i*2] );
+        uint8_t b = count_bits( msg[1 + i*2] );
+
+        p |= a ^ b;
+        p <<= 1;
+    }
+
+    msg[7] = (p << 3);
+}
+
+void add_r20_to_nibbles(uint8_t* msg, uint8_t r20, uint8_t start, uint8_t length)
+{
+	uint8_t i;
+
+	for( i = 0; i < 8; i++ )
+	{
+        uint8_t d = msg[i];
+
+        uint8_t ln = (d + r20) & 0x0F;
+        uint8_t hn = ((d & 0xF0) + (r20 & 0xF0)) & 0xFF;
+
+        msg[i] = hn | ln;
+
+        r20 = (r20 - 0x22) & 0xFF;
+	}
+}
+
+void xor_2byte_in_array(uint8_t* msg, uint8_t xor0, uint8_t xor1)
+{
+	uint8_t i;
+
+	for( i = 1; i < 4; i++ )
+	{
+        msg[i*2 + 0] = msg[i*2 + 0] ^ xor0;
+        msg[i*2 + 1] = msg[i*2 + 1] ^ xor1;
+	}
+}
+
+void encode_nibbles(uint8_t* msg)
+{
+	uint8_t i;
+
+	for( i = 0; i < 8; i++ )
+	{
+		uint8_t nh = (msg[i] >> 4) & 0x0F;
+		uint8_t nl = msg[i] & 0x0F;
+
+		uint8_t dh = flash_table_encode[nh];
+		uint8_t dl = flash_table_encode[nl];
+
+        msg[i] = ((dh << 4) & 0xFF) | ((dl) & 0xFF);
+	}
+}
+
+void msg_encode(uint8_t* msg, uint8_t xor0, uint8_t xor1)
+{
+	Serial.print("encode: ");
+	print_msg(msg);
+	Serial.println();
+
+    calc_parity(msg);
+
+	Serial.print("parity: ");
+	print_msg(msg);
+	Serial.println();
+
+    add_r20_to_nibbles(msg, 0xFE, 0, 8);
+
+	Serial.print("r20 nibbles: ");
+	print_msg(msg);
+	Serial.println();
+
+    xor_2byte_in_array(msg, xor0, xor1);
+
+	Serial.print("xor nibbles: ");
+	print_msg(msg);
+	Serial.println();
+
+    encode_nibbles(msg);
+
+	Serial.print("enocde nibbles: ");
+	print_msg(msg);
+	Serial.println();
+}
 
 void spi_write_cmd(uint8_t cmd)
 {
@@ -64,199 +192,208 @@ void spi_read_burst(uint8_t addr, uint8_t* data, uint8_t len)
 	hspi->endTransaction();
 }
 
-void send_msg_down(void)
+void spi_write_burst(uint8_t addr, uint8_t* data, uint8_t len)
 {
+	uint8_t i;
+
+	hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
+	digitalWrite(15, LOW);
+
+	hspi->transfer(addr);
+
+	for( i = 0; i < len; i++ )
+	{
+		hspi->transfer(data[i]);
+	}
+
+	digitalWrite(15, HIGH);
+	hspi->endTransaction();
+}
+
+static void cc1100_tx(uint8_t* msg, uint8_t len)
+{
+	uint8_t i;
+	uint8_t marcstate;
+
+	Serial.print("cc1100_tx...");
+
 	Serial.print("waiting for clear channel...");
 	while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
 	Serial.println("cleared");
 
-	Serial.println("button pressed");
-	hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-	digitalWrite(15, LOW);
-
-	hspi->transfer(0x7F);
-	hspi->transfer(0x1B);
-
-	hspi->transfer(036); // pck cnt
-
-	hspi->transfer(0x44);
-	hspi->transfer(0x10);
-	hspi->transfer(0x00);
-	hspi->transfer(0x01);
-	hspi->transfer(0x11);
-
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-
-	hspi->transfer(0x01);
-	hspi->transfer(0x11);
-	hspi->transfer(0x00);
-	hspi->transfer(0x03);
-
-	hspi->transfer(0x74;
-	hspi->transfer(0x77);
-	hspi->transfer(0x9E);
-	hspi->transfer(0x8D);
-	hspi->transfer(0x8C);
-	hspi->transfer(0x3B);
-	hspi->transfer(0xF4);
-	hspi->transfer(0xF0);
-/*
-	hspi->transfer(0xEE);
-	hspi->transfer(0x7A);
-	hspi->transfer(0xC4);
-	hspi->transfer(0x85);
-	hspi->transfer(0x22);
-	hspi->transfer(0x3A);
-	hspi->transfer(0xEE);
-	hspi->transfer(0xF6);
-*/
-	digitalWrite(15, HIGH);
-	hspi->endTransaction();
+	Serial.println("spi transmit start");
+	spi_write_burst(0x7F, msg, len);
+	Serial.println("spi transmit end");
 
 	delayMicroseconds(10);
 
+	Serial.println("cc1100_tx.tx");
 	spi_write_cmd(0x35);
 
+	Serial.println("cc1100_tx.waiting tx state");
 
-	while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
-	while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
+	do
+	{
+		marcstate = spi_read_reg(0xF5);
+		delay(1);
+	}
+	while( marcstate != 0x13 );
 
+	Serial.printf("cc1100_tx.waiting non tx state %x\r\n", marcstate);
+
+	do
+	{
+		marcstate = spi_read_reg(0xF5);
+		delay(1);
+	}
+	while( marcstate == 0x13 );
+
+	Serial.printf("done %x\r\n", marcstate);
+}
+
+
+static void generate_msg_down(uint8_t* msg, uint8_t index, uint8_t button_pressed)
+{
+	uint32_t i;
+	uint8_t* msg_data;
+
+	memset(msg, 0, 28);
+
+	msg[ 0] = 0x1B;
+	msg[ 1] = index; // pck cnt
+	msg[ 2] = 0x44;
+	msg[ 3] = 0x10;
+	msg[ 4] = 0x00;
+	msg[ 5] = 0x01;
+	msg[ 6] = 0x11;
+	msg[ 7] = 0x1A;
+	msg[ 8] = 0x01;
+	msg[ 9] = 0x0D;
+	msg[10] = 0x1A;
+	msg[11] = 0x01;
+	msg[12] = 0x0D;
+	msg[13] = 0x1A;
+	msg[14] = 0x01;
+	msg[15] = 0x0D;
+	msg[16] = 0x01;
+	msg[17] = 0x11;
+	msg[18] = 0x00;
+	msg[19] = 0x03;
+
+	gCode = (0x00 - (index * 0x708F)) & 0xFFFF;
+
+	msg[20] = (gCode >> 8) & 0xFF;
+	msg[21] = gCode & 0xFF;
+	msg[22] = (button_pressed) ? (0x40) : (0x00);
+
+	msg_encode(&msg[20], (gCode >> 8) & 0xFF, gCode & 0xFF);
+}
+
+static void generate_msg_stop(uint8_t* msg, uint8_t index, uint8_t button_pressed)
+{
+	uint32_t i;
+
+	memset(msg, 0, 30);
+
+	msg[ 0] = 0x1D;
+	msg[ 1] = index; // pck cnt
+	msg[ 2] = 0x6A;
+	msg[ 3] = 0x10;
+	msg[ 4] = 0x00;
+	msg[ 5] = 0x01;
+	msg[ 6] = 0x11;
+	msg[ 7] = 0x1A;
+	msg[ 8] = 0x01;
+	msg[ 9] = 0x0D;
+	msg[10] = 0x1A;
+	msg[11] = 0x01;
+	msg[12] = 0x0D;
+	msg[13] = 0x1A;
+	msg[14] = 0x01;
+	msg[15] = 0x0D;
+	msg[16] = 0x01;
+	msg[17] = 0xC2;
+	msg[18] = 0xA3;
+	msg[19] = 0x35;
+	msg[20] = 0x00;
+	msg[21] = 0x03;
+
+	gCode = (0x00 - (index * 0x708F)) & 0xFFFF;
+
+	msg[22] = (gCode >> 8) & 0xFF;
+	msg[23] = gCode & 0xFF;
+	msg[24] = 0x10;
+
+	msg_encode(&msg[22], (gCode >> 8) & 0xFF, gCode & 0xFF);
+}
+
+static void send_msg_down(void)
+{
+	uint8_t i;
+
+	generate_msg_down(msg_buffer, gIndex, 1);
+
+	gIndex++;
+
+	Serial.println("BUTTON DOWN PRESS msg generated:");
+	for( i = 0; i < 28; i++ )
+	{
+		Serial.printf("0x%02X ", msg_buffer[i]);
+	}
+
+	//for( i = 0; i < 3; i++ )
+	{
+		cc1100_tx(msg_buffer, 28);
+
+		delay(10);
+	}
 
 	delay(100);
-	while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
 
+	generate_msg_down(msg_buffer, gIndex, 0);
 
-	Serial.println("button released");
+	gIndex++;
 
-	hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-	digitalWrite(15, LOW);
+	Serial.println("BUTTON DOWN -- RELEASE msg generated:");
+	//for( i = 0; i < 28; i++ )
+	{
+		Serial.printf("0x%02X ", msg_buffer[i]);
+	}
 
-	hspi->transfer(0x7F);
-	hspi->transfer(0x1B);
+	for( i = 0; i < 3; i++ )
+	{
+		cc1100_tx(msg_buffer, 28);
 
-	hspi->transfer(0x37); // pck cnt
+		delay(10);
+	}
 
-	hspi->transfer(0x44);
-	hspi->transfer(0x10);
-	hspi->transfer(0x00);
-	hspi->transfer(0x01);
-	hspi->transfer(0x11);
-
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-
-	hspi->transfer(0x01);
-	hspi->transfer(0x11);
-	hspi->transfer(0x00);
-	hspi->transfer(0x03);
-
-	hspi->transfer(0x64);
-	hspi->transfer(0x45);
-	hspi->transfer(0xAE);
-	hspi->transfer(0xC1);
-	hspi->transfer(0x5C);
-	hspi->transfer(0xE6);
-	hspi->transfer(0x14);
-	hspi->transfer(0xCA);
-/*
-	hspi->transfer(0xEE);
-	hspi->transfer(0x7A);
-	hspi->transfer(0xC4);
-	hspi->transfer(0x85);
-	hspi->transfer(0x22);
-	hspi->transfer(0x3A);
-	hspi->transfer(0xEE);
-	hspi->transfer(0xF6);
-*/
-	digitalWrite(15, HIGH);
-	hspi->endTransaction();
-
-	delayMicroseconds(10);
-
-	spi_write_cmd(0x35);
-
-
-	while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
-	while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
-
+	delay(100);
 }
 
 void send_msg_stop(void)
 {
-	Serial.print("waiting for clear channel...");
-	while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
-	Serial.println("cleared");
+	uint8_t i;
 
-	Serial.println("command STOP!");
-	hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-	digitalWrite(15, LOW);
+	generate_msg_stop(msg_buffer, gIndex, 1);
 
-	hspi->transfer(0x7F);
-	hspi->transfer(0x1B);
-	hspi->transfer(0x1D);
+	gIndex++;
 
-	hspi->transfer(0x38); // pck cnt
+	Serial.println("BUTTON STOP PRESS msg generated:");
+	for( i = 0; i < 30; i++ )
+	{
+		Serial.printf("0x%02X ", msg_buffer[i]);
+	}
 
-	hspi->transfer(0x6A);
-	hspi->transfer(0x10);
-	hspi->transfer(0x00);
-	hspi->transfer(0x01);
-	hspi->transfer(0x11);
+	cc1100_tx(msg_buffer, 30);
+	delay(10);
 
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-	hspi->transfer(0x1A);
-	hspi->transfer(0x01);
-	hspi->transfer(0x0D);
-
-	hspi->transfer(0x01);
-	hspi->transfer(0xC2);
-	hspi->transfer(0xA3);
-	hspi->transfer(0x35);
-
-	hspi->transfer(0x00);
-	hspi->transfer(0x03);
-	hspi->transfer(0x93);
-	hspi->transfer(0xF9);
-	hspi->transfer(0xEF);
-	hspi->transfer(0xBF);
-	hspi->transfer(0xB9);
-	hspi->transfer(0xD9);
-	hspi->transfer(0x09);
-	hspi->transfer(0xD3);
-
-	digitalWrite(15, HIGH);
-	hspi->endTransaction();
-
-	delayMicroseconds(10);
-
-	spi_write_cmd(0x35);
-
-	while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
-	while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
 }
 
 void send_msg_up(void)
 {
+	uint8_t i;
+	uint8_t* msg_data;
+
 	Serial.print("waiting for clear channel...");
 	while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
 	Serial.println("cleared");
@@ -269,7 +406,7 @@ void send_msg_up(void)
 	hspi->transfer(0x7F);
 	hspi->transfer(0x1B);
 
-	hspi->transfer(0x01); // pckt
+	hspi->transfer(gIndex); // pckt
 
 	hspi->transfer(0x44);
 	hspi->transfer(0x12); // reset packet
@@ -292,14 +429,10 @@ void send_msg_up(void)
 	hspi->transfer(0x00);
 	hspi->transfer(0x03);
 
-	hspi->transfer(0x54);
-	hspi->transfer(0xF4);
-	hspi->transfer(0xEE);
-	hspi->transfer(0xBC);
-	hspi->transfer(0x6C);
-	hspi->transfer(0xDE);
-	hspi->transfer(0xA4);
-	hspi->transfer(0x02);
+	for( i = 0; i < 8; i++ )
+	{
+		hspi->transfer(msg_data[i]);
+	}
 
 	digitalWrite(15, HIGH);
 	hspi->endTransaction();
@@ -493,6 +626,13 @@ void loop()
 		{
 			tx = millis();
 
+			send_msg_down();
+
+			delay(2000);
+
+			send_msg_stop();
+			/*
+
 			switch(state)
 			{
 			case 0: send_msg_down(); state = 1; break;
@@ -500,7 +640,7 @@ void loop()
 			case 2: send_msg_up();   state = 0; break;
 			default: break;
 			}
-
+			*/
 		}
 	}
 }
