@@ -172,6 +172,28 @@ void decode_nibbles(uint8_t* msg, uint8_t len)
     }
 }
 
+uint8_t calc_exp_parity(uint16_t cnt, uint8_t* msg)
+{
+    uint16_t code;
+    uint8_t input_arr[8];
+
+    code = (0x00 - (cnt * 0x708F)) & 0xFFFF;
+
+    // copy message bytes to a buffer
+    memcpy(input_arr, msg, 8);
+
+    // clear parity position
+    input_arr[7] = 0;
+
+    // overwrite first 2 with the calculated magic from msg cnt/index
+    input_arr[0] = num >> 8;
+    input_arr[1] = num & 0xFF;
+
+    calc_parity(input_arr);
+
+    return input_arr[7];
+}
+
 void msg_decode(uint8_t* msg)
 {
 #ifdef DEBUG_PRINT_DECODE
@@ -720,41 +742,44 @@ void loop()
 
             if(bytes_in_fifo)
             {
+                uint8_t calc_par;
+
                 pck_len = spi_read_reg(0xFF);
                 bytes_in_fifo--,
 
                 spi_read_burst(0xFF, rx_fifo, bytes_in_fifo);
 
 #ifdef ELERO_MSG_ALL
-                Serial.printf("[%7d] plen=0x%02X ", millis(), pck_len);
+                Serial.printf("[%7d] len=%2d ", millis(), pck_len);
 
                 Serial.printf("cnt=%3d ", rx_fifo[0]);
-                Serial.printf("pck_info=0x%02X ", rx_fifo[1]);
-                Serial.printf("pck_info2=0x%02X ", rx_fifo[2]);
-                Serial.printf("hop=0x%02X ", rx_fifo[3]);
-                Serial.printf("addr_sys=0x%02X ", rx_fifo[4]);
-                Serial.printf("src_grp=0x%02X ", rx_fifo[5]);
-                Serial.printf("addr_scr=0x%02X:0x%02X:0x%02X ", rx_fifo[6],  rx_fifo[7],  rx_fifo[8]);
-                Serial.printf("addr_bwd=0x%02X:0x%02X:0x%02X ", rx_fifo[9],  rx_fifo[10], rx_fifo[11]);
-                Serial.printf("addr_fwd=0x%02X:0x%02X:0x%02X ", rx_fifo[12], rx_fifo[13], rx_fifo[14]);
-                Serial.printf("dst_cnt=0x%02X ", rx_fifo[15]);
-                Serial.printf("dst=0x%02X ", rx_fifo[16]);
+                Serial.printf("0x%02X ", rx_fifo[1]);              // pck_info
+                Serial.printf("0x%02X ", rx_fifo[2]);              // pck_info2
+                Serial.printf("0x%02X ", rx_fifo[3]);              // hop
+                Serial.printf("0x%02X ", rx_fifo[4]);              // addr_sys
+                Serial.printf("0x%02X ", rx_fifo[5]);              // src_grp
+                Serial.printf("src=[%02X%02X%02X] ", rx_fifo[6],  rx_fifo[7],  rx_fifo[8]);  // source addr
+                Serial.printf("bwd=[%02X%02X%02X] ", rx_fifo[9],  rx_fifo[10], rx_fifo[11]); // backward addr
+                Serial.printf("fwd=[%02X%02X%02X] ", rx_fifo[12], rx_fifo[13], rx_fifo[14]); // fwd addr
+                Serial.printf("[0x%02X ", rx_fifo[15]);             // destination count
+                Serial.printf("0x%02X] ", rx_fifo[16]);          // destination
 
-                Serial.printf("payl=");
+                Serial.printf("payl={");
                 for( i = 0; i < (pck_len-17); i++ )
                 {
                     Serial.printf("0x%02X ", rx_fifo[17+i]);
                 }
+                Serial.printf("} ");
 
                 //Serial.printf("| CRC=%d LQI=%x RSSI=%d | ", (rx_fifo[bytes_in_fifo-2] & (0x80)) == 0x80, rx_fifo[bytes_in_fifo-2] & (~0x80), rx_fifo[bytes_in_fifo-1]);
 
-                if( pck_len == 0x1B )
+                if( pck_len == 0x1B )   // len=27
                 {
                     msg_decode(&rx_fifo[19]);
 
-                    Serial.printf(" | payl_dec = ");
+                    Serial.printf("| payl_dec=");
 
-                    // un-encrypted part of payload
+                    // non-encrypted part of payload
                     Serial.printf("{0x%02X 0x%02X} ", rx_fifo[17], rx_fifo[18]);
 
                     // always 0 (contains the key that gets eliminated during decrypt) - printing for checking the encrypt process
@@ -766,11 +791,59 @@ void loop()
                         Serial.printf("0x%02X ", rx_fifo[21+i]);
                     }
 
+
+                    calc_par = calc_exp_parity(rx_fifo[0], &rx_fifo[19]);
+
                     // + 1 last byte as parity
-                    Serial.printf(" {0x%02X} ", rx_fifo[26]);
+                    Serial.printf(" {0x%02X} =?= {0x%02X}", rx_fifo[26], calc_par);
                 }
 
-                Serial.println("");
+                if( pck_len == 0x1C )   // len=28
+                {
+                    msg_decode(&rx_fifo[20]);
+
+                    Serial.printf("| payl_dec=");
+
+                    // non-encrypted part of payload
+                    Serial.printf("{0x%02X 0x%02X 0x%02X} ", rx_fifo[17], rx_fifo[18], rx_fifo[19]);
+
+                    // always 0 (contains the key that gets eliminated during decrypt) - printing for checking the encrypt process
+                    Serial.printf("{0x%02X 0x%02X} ", rx_fifo[20], rx_fifo[21]);
+
+                    // useful payload
+                    for( i = 0; i < 5; i++ )
+                    {
+                        Serial.printf("0x%02X ", rx_fifo[22+i]);
+                    }
+
+                    // + 1 last byte as parity
+                    Serial.printf(" {0x%02X} ", rx_fifo[27]);
+                }
+
+                if( pck_len == 0x1D )   // len=29
+                {
+                    msg_decode(&rx_fifo[21]);
+
+                    Serial.printf("| payl_dec=");
+
+                    // non-encrypted part of payload
+                    Serial.printf("{0x%02X 0x%02X 0x%02X 0x%02X} ", rx_fifo[17], rx_fifo[18], rx_fifo[19], rx_fifo[20]);
+
+                    // always 0 (contains the key that gets eliminated during decrypt) - printing for checking the encrypt process
+                    Serial.printf("{0x%02X 0x%02X} ", rx_fifo[21], rx_fifo[22]);
+
+                    // useful payload
+                    for( i = 0; i < 5; i++ )
+                    {
+                        Serial.printf("0x%02X ", rx_fifo[23+i]);
+                    }
+
+                    // + 1 last byte as parity
+                    Serial.printf(" {0x%02X} ", rx_fifo[28]);
+                }
+
+
+                Serial.println();
 #endif
 
 #ifdef ELERO_MSG_JUST_MY_REMOTES
