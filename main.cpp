@@ -4,22 +4,39 @@
 #include <esp_wifi.h>
 #include <SPI.h>
 
-#define CC1101_GDO0     (26)
-#define CC1101_GDO2     (25)
+//#define DEBUG_PRINT_ENCODE
+//#define DEBUG_PRINT_DECODE
 
-#define SIGNAL_CLEAR_CHANNEL_ASSESMENT  CC1101_GDO0
-#define SYNCWORD_DET_SENT_TX_SENT       CC1101_GDO2
+#define CC1101_GDO0        (26)
+#define CC1101_GDO2        (25)
+
+#define HSPI_CS            (15)
+#define HSPI_SCLK        (14) // for doc
+#define HSPI_MISO        (12) // for doc
+#define HSPI_MOSI        (13) // for doc
+
+
+#define TEST_INPUT        (17)
+
+#define SIGNAL_CLEAR_CHANNEL_ASSESMENT    CC1101_GDO0
+#define SYNCWORD_DET_SENT_TX_SENT        CC1101_GDO2
 
 static const int spiClk = 500000;
 byte address = 0x00;
 SPIClass * hspi = NULL;
 
 static const uint8_t flash_table_encode[] = {0x08, 0x02, 0x0d, 0x01, 0x0f, 0x0e, 0x07, 0x05, 0x09, 0x0c, 0x00, 0x0a, 0x03, 0x04, 0x0b, 0x06};
+static const uint8_t flash_table_decode[] = {0x0a, 0x03, 0x01, 0x0c, 0x0d, 0x07, 0x0f, 0x06, 0x00, 0x08, 0x0b, 0x0e, 0x09, 0x02, 0x05, 0x04};
 
 static uint8_t gIndex = 0x60;
 static uint16_t gCode = (0x00 - (gIndex * 0x708F)) & 0xFFFF;
 
 static uint8_t msg_buffer[64];
+
+static const uint8_t my_remotes[2][3] = {
+        {0x1A, 0x01, 0x0D},
+        {0x62, 0x0B, 0x0D},
+};
 
 static void print_msg(uint8_t* msg)
 {
@@ -84,11 +101,39 @@ void add_r20_to_nibbles(uint8_t* msg, uint8_t r20, uint8_t start, uint8_t length
     }
 }
 
-void xor_2byte_in_array(uint8_t* msg, uint8_t xor0, uint8_t xor1)
+void sub_r20_from_nibbles(uint8_t* msg, uint8_t r20, uint8_t start, uint8_t length)
+{
+    uint8_t i;
+
+    for(i = start; i < length; i++)
+    {
+        uint8_t d = msg[i];
+
+        uint8_t ln = (d - r20) & 0x0F;
+        uint8_t hn = ((d & 0xF0) - (r20 & 0xF0)) & 0xFF;
+
+        msg[i] = hn | ln;
+
+        r20 = (r20 - 0x22) & 0xFF;
+    }
+}
+
+void xor_2byte_in_array_encode(uint8_t* msg, uint8_t xor0, uint8_t xor1)
 {
     uint8_t i;
 
     for( i = 1; i < 4; i++ )
+    {
+        msg[i*2 + 0] = msg[i*2 + 0] ^ xor0;
+        msg[i*2 + 1] = msg[i*2 + 1] ^ xor1;
+    }
+}
+
+void xor_2byte_in_array_decode(uint8_t* msg, uint8_t xor0, uint8_t xor1)
+{
+    uint8_t i;
+
+    for( i = 0; i < 4; i++ )
     {
         msg[i*2 + 0] = msg[i*2 + 0] ^ xor0;
         msg[i*2 + 1] = msg[i*2 + 1] ^ xor1;
@@ -111,53 +156,117 @@ void encode_nibbles(uint8_t* msg)
     }
 }
 
+void decode_nibbles(uint8_t* msg, uint8_t len)
+{
+    uint8_t i;
+
+    for( i = 0; i < len; i++ )
+    {
+        uint8_t nh = (msg[i] >> 4) & 0x0F;
+        uint8_t nl = msg[i] & 0x0F;
+
+        uint8_t dh = flash_table_decode[nh];
+        uint8_t dl = flash_table_decode[nl];
+
+        msg[i] = ((dh << 4) & 0xFF) | ((dl) & 0xFF);
+    }
+}
+
+void msg_decode(uint8_t* msg)
+{
+#ifdef DEBUG_PRINT_DECODE
+    Serial.print("decode_nibbles: ");
+#endif
+
+    decode_nibbles(msg, 8);
+
+#ifdef DEBUG_PRINT_DECODE
+    print_msg(msg);
+    Serial.println();
+    Serial.print("sub_r20_from_nibbles: ");
+#endif
+
+    sub_r20_from_nibbles(msg, 0xFE, 0, 2);
+
+#ifdef DEBUG_PRINT_DECODE
+    print_msg(msg);
+    Serial.println();
+    Serial.printf("xor_2byte_in_array: %x %x", msg[0], msg[1]);
+#endif
+
+    xor_2byte_in_array_decode(msg, msg[0], msg[1]);
+
+#ifdef DEBUG_PRINT_DECODE
+    print_msg(msg);
+    Serial.println();
+    Serial.print("sub_r20_from_nibbles: ");
+#endif
+
+    sub_r20_from_nibbles(msg, 0xBA, 2, 8);
+
+#ifdef DEBUG_PRINT_DECODE
+    print_msg(msg);
+    Serial.println();
+#endif
+}
+
 void msg_encode(uint8_t* msg, uint8_t xor0, uint8_t xor1)
 {
+#ifdef DEBUG_PRINT_ENCODE
     Serial.print("encode: ");
     print_msg(msg);
     Serial.println();
+#endif
 
     calc_parity(msg);
 
+#ifdef DEBUG_PRINT_ENCODE
     Serial.print("parity: ");
     print_msg(msg);
     Serial.println();
+#endif
 
     add_r20_to_nibbles(msg, 0xFE, 0, 8);
 
+#ifdef DEBUG_PRINT_ENCODE
     Serial.print("r20 nibbles: ");
     print_msg(msg);
     Serial.println();
+#endif
 
-    xor_2byte_in_array(msg, xor0, xor1);
+    xor_2byte_in_array_encode(msg, xor0, xor1);
 
+#ifdef DEBUG_PRINT_ENCODE
     Serial.print("xor nibbles: ");
     print_msg(msg);
     Serial.println();
+#endif
 
     encode_nibbles(msg);
 
-    Serial.print("enocde nibbles: ");
+#ifdef DEBUG_PRINT_ENCODE
+    Serial.print("encode nibbles: ");
     print_msg(msg);
     Serial.println();
+#endif
 }
 
 void spi_write_cmd(uint8_t cmd)
 {
     hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(15, LOW);
+    digitalWrite(HSPI_CS, LOW);
     hspi->transfer(cmd);
-    digitalWrite(15, HIGH);
+    digitalWrite(HSPI_CS, HIGH);
     hspi->endTransaction();
 }
 
 void spi_write_reg(uint8_t addr, uint8_t value)
 {
     hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(15, LOW);
+    digitalWrite(HSPI_CS, LOW);
     hspi->transfer(addr);
     hspi->transfer(value);
-    digitalWrite(15, HIGH);
+    digitalWrite(HSPI_CS, HIGH);
     hspi->endTransaction();
 }
 
@@ -165,10 +274,10 @@ uint8_t spi_read_reg(uint8_t addr)
 {
     uint8_t reg;
     hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(15, LOW);
+    digitalWrite(HSPI_CS, LOW);
     hspi->transfer(addr);
     reg = hspi->transfer(0x00);
-    digitalWrite(15, HIGH);
+    digitalWrite(HSPI_CS, HIGH);
     hspi->endTransaction();
 
     return reg;
@@ -179,7 +288,7 @@ void spi_read_burst(uint8_t addr, uint8_t* data, uint8_t len)
     uint8_t i;
 
     hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(15, LOW);
+    digitalWrite(HSPI_CS, LOW);
 
     hspi->transfer(addr);
 
@@ -188,7 +297,7 @@ void spi_read_burst(uint8_t addr, uint8_t* data, uint8_t len)
         data[i] = hspi->transfer(0x00);
     }
 
-    digitalWrite(15, HIGH);
+    digitalWrite(HSPI_CS, HIGH);
     hspi->endTransaction();
 }
 
@@ -197,7 +306,7 @@ void spi_write_burst(uint8_t addr, uint8_t* data, uint8_t len)
     uint8_t i;
 
     hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(15, LOW);
+    digitalWrite(HSPI_CS, LOW);
 
     hspi->transfer(addr);
 
@@ -206,7 +315,7 @@ void spi_write_burst(uint8_t addr, uint8_t* data, uint8_t len)
         hspi->transfer(data[i]);
     }
 
-    digitalWrite(15, HIGH);
+    digitalWrite(HSPI_CS, HIGH);
     hspi->endTransaction();
 }
 
@@ -259,24 +368,28 @@ static void generate_msg_down(uint8_t* msg, uint8_t index, uint8_t button_presse
 
     memset(msg, 0, 28);
 
-    msg[ 0] = 0x1B;
-    msg[ 1] = index; // pck cnt
-    msg[ 2] = 0x44;
-    msg[ 3] = 0x10;
-    msg[ 4] = 0x00;
-    msg[ 5] = 0x01;
-    msg[ 6] = 0x11;
-    msg[ 7] = 0x1A;
-    msg[ 8] = 0x01;
-    msg[ 9] = 0x0D;
-    msg[10] = 0x1A;
-    msg[11] = 0x01;
-    msg[12] = 0x0D;
-    msg[13] = 0x1A;
-    msg[14] = 0x01;
-    msg[15] = 0x0D;
-    msg[16] = 0x01;
-    msg[17] = 0x11;
+    msg[ 0] = 0x1B;      // msg_len
+    msg[ 1] = index;      // pck cnt
+    msg[ 2] = 0x44;      // pck_info = STOP
+    msg[ 3] = 0x10;      // pck_inf2 = STOP
+    msg[ 4] = 0x00;      // hop_info = 0
+    msg[ 5] = 0x01;      // sys_addr = 1
+    msg[ 6] = 0x11;      // source_group = 0x11
+
+    msg[ 7] = 0x1A;        // source addr[0]
+    msg[ 8] = 0x01;        // source addr[1]
+    msg[ 9] = 0x0D;        // source addr[2]
+
+    msg[10] = 0x1A;        // backward addr[0]
+    msg[11] = 0x01;        // backward addr[1]
+    msg[12] = 0x0D;        // backward addr[2]
+
+    msg[13] = 0x1A;        // forward addr[0]
+    msg[14] = 0x01;        // forward addr[1]
+    msg[15] = 0x0D;        // forward addr[2]
+
+    msg[16] = 0x01;        // dest_count = 1
+    msg[17] = 0x11;        // dest = TODO        (ch1=0x11(?) ch2=0x02 ch3=0x03 ch4=0x03)
     msg[18] = 0x00;
     msg[19] = 0x03;
 
@@ -295,24 +408,28 @@ static void generate_msg_stop(uint8_t* msg, uint8_t index, uint8_t button_presse
 
     memset(msg, 0, 30);
 
-    msg[ 0] = 0x1D;
-    msg[ 1] = index; // pck cnt
-    msg[ 2] = 0x6A;
-    msg[ 3] = 0x10;
-    msg[ 4] = 0x00;
-    msg[ 5] = 0x01;
-    msg[ 6] = 0x11;
-    msg[ 7] = 0x1A;
-    msg[ 8] = 0x01;
-    msg[ 9] = 0x0D;
-    msg[10] = 0x1A;
-    msg[11] = 0x01;
-    msg[12] = 0x0D;
-    msg[13] = 0x1A;
-    msg[14] = 0x01;
-    msg[15] = 0x0D;
-    msg[16] = 0x01;
-    msg[17] = 0xC2;
+    msg[ 0] = 0x1D;        // msg_len
+    msg[ 1] = index;     // pck cnt
+    msg[ 2] = 0x6A;        // pck_info = STOP
+    msg[ 3] = 0x10;        // pck_inf2 = STOP
+    msg[ 4] = 0x00;        // hop_info = 0
+    msg[ 5] = 0x01;        // sys_addr = 1
+    msg[ 6] = 0x11;        // source_group = 0x11
+
+    msg[ 7] = 0x1A;        // source addr[0]
+    msg[ 8] = 0x01;        // source addr[1]
+    msg[ 9] = 0x0D;        // source addr[2]
+
+    msg[10] = 0x1A;        // backward addr[0]
+    msg[11] = 0x01;        // backward addr[1]
+    msg[12] = 0x0D;        // backward addr[2]
+
+    msg[13] = 0x1A;        // forward addr[0]
+    msg[14] = 0x01;        // forward addr[1]
+    msg[15] = 0x0D;        // forward addr[2]
+
+    msg[16] = 0x01;        // dest_count = 1
+    msg[17] = 0xC2;        // dest = TODO
     msg[18] = 0xA3;
     msg[19] = 0x35;
     msg[20] = 0x00;
@@ -401,7 +518,7 @@ void send_msg_up(void)
     Serial.println("UP: button pressed");
 
     hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(15, LOW);
+    digitalWrite(HSPI_CS, LOW);
 
     hspi->transfer(0x7F);
     hspi->transfer(0x1B);
@@ -434,7 +551,7 @@ void send_msg_up(void)
         hspi->transfer(msg_data[i]);
     }
 
-    digitalWrite(15, HIGH);
+    digitalWrite(HSPI_CS, HIGH);
     hspi->endTransaction();
 
     delayMicroseconds(10);
@@ -452,7 +569,7 @@ void send_msg_up(void)
     while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
 
     hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(15, LOW);
+    digitalWrite(HSPI_CS, LOW);
 
     hspi->transfer(0x7F);
     hspi->transfer(0x1B);
@@ -498,7 +615,7 @@ void send_msg_up(void)
     hspi->transfer(0xEE);
     hspi->transfer(0xF6);
 */
-    digitalWrite(15, HIGH);
+    digitalWrite(HSPI_CS, HIGH);
     hspi->endTransaction();
 
     delayMicroseconds(10);
@@ -514,12 +631,13 @@ void setup()
     Serial.begin(460800);
 
     delay(100);
-    pinMode(15, OUTPUT);
-    digitalWrite(15, HIGH);
+
+    pinMode(HSPI_CS, OUTPUT);
+    digitalWrite(HSPI_CS, HIGH);
 
     pinMode(CC1101_GDO0, INPUT);
     pinMode(CC1101_GDO2, INPUT);
-    pinMode(17, INPUT_PULLUP);
+    pinMode(TEST_INPUT, INPUT_PULLUP);
 
     hspi = new SPIClass(HSPI);
     hspi->begin();
@@ -582,6 +700,9 @@ uint8_t rx_fifo[256];
 uint32_t tx;
 uint8_t state;
 
+//#define ELERO_MSG_JUST_MY_REMOTES
+#define ELERO_MSG_ALL
+
 void loop()
 {
     uint8_t sync_det = digitalRead(SYNCWORD_DET_SENT_TX_SENT);
@@ -604,23 +725,128 @@ void loop()
 
                 spi_read_burst(0xFF, rx_fifo, bytes_in_fifo);
 
-                Serial.printf("[%7d] %d pck_len=0x%02X ", millis(), bytes_in_fifo, pck_len);
+#ifdef ELERO_MSG_ALL
+                Serial.printf("[%7d] plen=0x%02X ", millis(), pck_len);
 
-                for(i = 0; i < (bytes_in_fifo-2); i++ )
+                Serial.printf("cnt=%3d ", rx_fifo[0]);
+                Serial.printf("pck_info=0x%02X ", rx_fifo[1]);
+                Serial.printf("pck_info2=0x%02X ", rx_fifo[2]);
+                Serial.printf("hop=0x%02X ", rx_fifo[3]);
+                Serial.printf("addr_sys=0x%02X ", rx_fifo[4]);
+                Serial.printf("src_grp=0x%02X ", rx_fifo[5]);
+                Serial.printf("addr_scr=0x%02X:0x%02X:0x%02X ", rx_fifo[6],  rx_fifo[7],  rx_fifo[8]);
+                Serial.printf("addr_bwd=0x%02X:0x%02X:0x%02X ", rx_fifo[9],  rx_fifo[10], rx_fifo[11]);
+                Serial.printf("addr_fwd=0x%02X:0x%02X:0x%02X ", rx_fifo[12], rx_fifo[13], rx_fifo[14]);
+                Serial.printf("dst_cnt=0x%02X ", rx_fifo[15]);
+                Serial.printf("dst=0x%02X ", rx_fifo[16]);
+
+                Serial.printf("payl=");
+                for( i = 0; i < (pck_len-17); i++ )
                 {
-                    Serial.printf("0x%02X ", rx_fifo[i]);
+                    Serial.printf("0x%02X ", rx_fifo[17+i]);
                 }
 
-                Serial.printf("CRC=%d LQI=%x RSSI=%d ", (rx_fifo[bytes_in_fifo-2] & (0x80)) == 0x80, rx_fifo[bytes_in_fifo-2] & (~0x80), rx_fifo[bytes_in_fifo-1]);
+                //Serial.printf("| CRC=%d LQI=%x RSSI=%d | ", (rx_fifo[bytes_in_fifo-2] & (0x80)) == 0x80, rx_fifo[bytes_in_fifo-2] & (~0x80), rx_fifo[bytes_in_fifo-1]);
+
+                if( pck_len == 0x1B )
+                {
+                    msg_decode(&rx_fifo[19]);
+
+                    Serial.printf(" | payl_dec = ");
+
+                    // un-encrypted part of payload
+                    Serial.printf("{0x%02X 0x%02X} ", rx_fifo[17], rx_fifo[18]);
+
+                    // always 0 (contains the key that gets eliminated during decrypt) - printing for checking the encrypt process
+                    Serial.printf("{0x%02X 0x%02X} ", rx_fifo[19], rx_fifo[20]);
+
+                    // useful payload
+                    for( i = 0; i < 5; i++ )
+                    {
+                        Serial.printf("0x%02X ", rx_fifo[21+i]);
+                    }
+
+                    // + 1 last byte as parity
+                    Serial.printf(" {0x%02X} ", rx_fifo[26]);
+                }
 
                 Serial.println("");
+#endif
+
+#ifdef ELERO_MSG_JUST_MY_REMOTES
+                uint8_t myremote = 0;
+
+                for( i = 0; i < 2; i++ )
+                {
+
+                    if( (memcmp(&rx_fifo[6], &my_remotes[i][0], 3) == 0) && (memcmp(&rx_fifo[9], &my_remotes[i][0], 3) == 0) && (memcmp(&rx_fifo[12], &my_remotes[i][0], 3) == 0) )
+                    {
+                        myremote = 1;
+                    }
+                }
+
+                if( myremote )
+                {
+                    Serial.printf("[%7d] pck_len=0x%02X ------------------------------------------------------------------------------- \r\n ", millis(), pck_len);
+
+                    Serial.printf("index/counter %d\r\n", rx_fifo[0]);
+                    Serial.printf("packet info        0x%02X\r\n", rx_fifo[1]);
+                    Serial.printf("packet info 2      0x%02X\r\n", rx_fifo[2]);
+                    Serial.printf("hop information    0x%02X\r\n", rx_fifo[3]);
+                    Serial.printf("sys address        0x%02X\r\n", rx_fifo[4]);
+                    Serial.printf("source group       0x%02X\r\n", rx_fifo[5]);
+                    Serial.printf("source address     0x%02X:0x%02X:0x%02X\r\n", rx_fifo[6],  rx_fifo[7],  rx_fifo[8]);
+                    Serial.printf("backward address   0x%02X:0x%02X:0x%02X\r\n", rx_fifo[9],  rx_fifo[10], rx_fifo[11]);
+                    Serial.printf("forward address    0x%02X:0x%02X:0x%02X\r\n", rx_fifo[12], rx_fifo[13], rx_fifo[14]);
+                    Serial.printf("destination count  0x%02X\r\n", rx_fifo[15]);
+                    Serial.printf("destination        0x%02X\r\n", rx_fifo[16]);
+
+
+                    Serial.printf("payload_orig    = ");
+
+                    for( i = 0; i < 10; i++ )
+                    {
+                        Serial.printf("0x%02X ", rx_fifo[17+i]);
+                    }
+                    Serial.println();
+
+
+                    msg_decode(&rx_fifo[19]);
+
+                    Serial.printf("payload_decoded = ");
+                    Serial.printf("0x%02X ", rx_fifo[17]);
+                    Serial.printf("0x%02X ", rx_fifo[18]);
+
+                    for( i = 0; i < 8; i++ )
+                    {
+                        Serial.printf("0x%02X ", rx_fifo[19+i]);
+                    }
+                    Serial.println();
+
+                    Serial.printf("payload_useful  = ");
+                    Serial.printf("0x%02X ", rx_fifo[17]);
+                    Serial.printf("0x%02X ", rx_fifo[18]);
+                    //Serial.printf("0x%02X ", rx_fifo[19]);    // key0
+                    //Serial.printf("0x%02X ", rx_fifo[20]);    // key1
+                    Serial.printf("0x%02X ", rx_fifo[21]);
+                    Serial.printf("0x%02X ", rx_fifo[22]);
+                    Serial.printf("0x%02X ", rx_fifo[23]);
+                    Serial.printf("0x%02X ", rx_fifo[24]);
+                    Serial.printf("0x%02X ", rx_fifo[25]);
+                    //Serial.printf("0x%02X ", rx_fifo[26]);    // parity
+                    Serial.println();
+
+                    Serial.printf("CRC=%d LQI=%x RSSI=%d ", (rx_fifo[bytes_in_fifo-2] & (0x80)) == 0x80, rx_fifo[bytes_in_fifo-2] & (~0x80), rx_fifo[bytes_in_fifo-1]);
+                    Serial.println("");
+                }
+#endif
             }
         }
     }
 
     sync_det_prev = sync_det;
 
-    if( digitalRead(17) == LOW )
+    if( digitalRead(TEST_INPUT) == LOW )
     {
         if( (millis()-tx) > 2000 )
         {
