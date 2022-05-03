@@ -174,10 +174,10 @@ void decode_nibbles(uint8_t* msg, uint8_t len)
 
 uint8_t calc_exp_parity(uint16_t cnt, uint8_t* msg)
 {
-    uint16_t code;
+    uint16_t num;
     uint8_t input_arr[8];
 
-    code = (0x00 - (cnt * 0x708F)) & 0xFFFF;
+    num = (0x00 - (cnt * 0x708F)) & 0xFFFF;
 
     // copy message bytes to a buffer
     memcpy(input_arr, msg, 8);
@@ -186,8 +186,8 @@ uint8_t calc_exp_parity(uint16_t cnt, uint8_t* msg)
     input_arr[7] = 0;
 
     // overwrite first 2 with the calculated magic from msg cnt/index
-    input_arr[0] = num >> 8;
-    input_arr[1] = num & 0xFF;
+    input_arr[0] = 0; //num >> 8;
+    input_arr[1] = 0; //num & 0xFF;
 
     calc_parity(input_arr);
 
@@ -722,8 +722,7 @@ uint8_t rx_fifo[256];
 uint32_t tx;
 uint8_t state;
 
-//#define ELERO_MSG_JUST_MY_REMOTES
-#define ELERO_MSG_ALL
+#define ELERO_MSG_JUST_MY_REMOTES
 
 void loop()
 {
@@ -749,7 +748,21 @@ void loop()
 
                 spi_read_burst(0xFF, rx_fifo, bytes_in_fifo);
 
-#ifdef ELERO_MSG_ALL
+#ifdef ELERO_MSG_JUST_MY_REMOTES
+                uint8_t myremote = 0;
+
+                for( i = 0; i < 2; i++ )
+                {
+
+                    if( (memcmp(&rx_fifo[6], &my_remotes[i][0], 3) == 0) && (memcmp(&rx_fifo[9], &my_remotes[i][0], 3) == 0) && (memcmp(&rx_fifo[12], &my_remotes[i][0], 3) == 0) )
+                    {
+                        myremote = 1;
+                    }
+                }
+
+                if( myremote )
+                {
+#endif
                 Serial.printf("[%7d] len=%2d ", millis(), pck_len);
 
                 Serial.printf("cnt=%3d ", rx_fifo[0]);
@@ -795,7 +808,7 @@ void loop()
                     calc_par = calc_exp_parity(rx_fifo[0], &rx_fifo[19]);
 
                     // + 1 last byte as parity
-                    Serial.printf(" {0x%02X} =?= {0x%02X}", rx_fifo[26], calc_par);
+                    Serial.printf(" {0x%02X} %c {0x%02X}", rx_fifo[26], (rx_fifo[26] == calc_par)?('='):('?'), calc_par);
                 }
 
                 if( pck_len == 0x1C )   // len=28
@@ -842,75 +855,29 @@ void loop()
                     Serial.printf(" {0x%02X} ", rx_fifo[28]);
                 }
 
-
-                Serial.println();
-#endif
-
-#ifdef ELERO_MSG_JUST_MY_REMOTES
-                uint8_t myremote = 0;
-
-                for( i = 0; i < 2; i++ )
+                if( pck_len == 0x1E )   // len=29
                 {
+                    msg_decode(&rx_fifo[22]);
 
-                    if( (memcmp(&rx_fifo[6], &my_remotes[i][0], 3) == 0) && (memcmp(&rx_fifo[9], &my_remotes[i][0], 3) == 0) && (memcmp(&rx_fifo[12], &my_remotes[i][0], 3) == 0) )
+                    Serial.printf("| payl_dec=");
+
+                    // non-encrypted part of payload
+                    Serial.printf("{0x%02X 0x%02X 0x%02X 0x%02X 0x%02X} ", rx_fifo[17], rx_fifo[18], rx_fifo[19], rx_fifo[20], rx_fifo[21]);
+
+                    // always 0 (contains the key that gets eliminated during decrypt) - printing for checking the encrypt process
+                    Serial.printf("{0x%02X 0x%02X} ", rx_fifo[22], rx_fifo[23]);
+
+                    // useful payload
+                    for( i = 0; i < 5; i++ )
                     {
-                        myremote = 1;
+                        Serial.printf("0x%02X ", rx_fifo[24+i]);
                     }
+
+                    // + 1 last byte as parity
+                    Serial.printf(" {0x%02X} ", rx_fifo[29]);
                 }
-
-                if( myremote )
-                {
-                    Serial.printf("[%7d] pck_len=0x%02X ------------------------------------------------------------------------------- \r\n ", millis(), pck_len);
-
-                    Serial.printf("index/counter %d\r\n", rx_fifo[0]);
-                    Serial.printf("packet info        0x%02X\r\n", rx_fifo[1]);
-                    Serial.printf("packet info 2      0x%02X\r\n", rx_fifo[2]);
-                    Serial.printf("hop information    0x%02X\r\n", rx_fifo[3]);
-                    Serial.printf("sys address        0x%02X\r\n", rx_fifo[4]);
-                    Serial.printf("source group       0x%02X\r\n", rx_fifo[5]);
-                    Serial.printf("source address     0x%02X:0x%02X:0x%02X\r\n", rx_fifo[6],  rx_fifo[7],  rx_fifo[8]);
-                    Serial.printf("backward address   0x%02X:0x%02X:0x%02X\r\n", rx_fifo[9],  rx_fifo[10], rx_fifo[11]);
-                    Serial.printf("forward address    0x%02X:0x%02X:0x%02X\r\n", rx_fifo[12], rx_fifo[13], rx_fifo[14]);
-                    Serial.printf("destination count  0x%02X\r\n", rx_fifo[15]);
-                    Serial.printf("destination        0x%02X\r\n", rx_fifo[16]);
-
-
-                    Serial.printf("payload_orig    = ");
-
-                    for( i = 0; i < 10; i++ )
-                    {
-                        Serial.printf("0x%02X ", rx_fifo[17+i]);
-                    }
-                    Serial.println();
-
-
-                    msg_decode(&rx_fifo[19]);
-
-                    Serial.printf("payload_decoded = ");
-                    Serial.printf("0x%02X ", rx_fifo[17]);
-                    Serial.printf("0x%02X ", rx_fifo[18]);
-
-                    for( i = 0; i < 8; i++ )
-                    {
-                        Serial.printf("0x%02X ", rx_fifo[19+i]);
-                    }
-                    Serial.println();
-
-                    Serial.printf("payload_useful  = ");
-                    Serial.printf("0x%02X ", rx_fifo[17]);
-                    Serial.printf("0x%02X ", rx_fifo[18]);
-                    //Serial.printf("0x%02X ", rx_fifo[19]);    // key0
-                    //Serial.printf("0x%02X ", rx_fifo[20]);    // key1
-                    Serial.printf("0x%02X ", rx_fifo[21]);
-                    Serial.printf("0x%02X ", rx_fifo[22]);
-                    Serial.printf("0x%02X ", rx_fifo[23]);
-                    Serial.printf("0x%02X ", rx_fifo[24]);
-                    Serial.printf("0x%02X ", rx_fifo[25]);
-                    //Serial.printf("0x%02X ", rx_fifo[26]);    // parity
-                    Serial.println();
-
-                    Serial.printf("CRC=%d LQI=%x RSSI=%d ", (rx_fifo[bytes_in_fifo-2] & (0x80)) == 0x80, rx_fifo[bytes_in_fifo-2] & (~0x80), rx_fifo[bytes_in_fifo-1]);
-                    Serial.println("");
+                Serial.println();
+#ifdef ELERO_MSG_JUST_MY_REMOTES
                 }
 #endif
             }
