@@ -1,5 +1,5 @@
 # elero radio configuration
-elero 868 radio configuration is in the seutp field
+Elero GmbH - 868 radio VarioTel2
 
 When you switch on the remote it loads the config found in C file.
 
