@@ -4,6 +4,7 @@
 #include <esp_wifi.h>
 #include <SPI.h>
 
+
 //#define DEBUG_PRINT_ENCODE
 //#define DEBUG_PRINT_DECODE
 
@@ -21,6 +22,11 @@
 #define SIGNAL_CLEAR_CHANNEL_ASSESMENT    CC1101_GDO0
 #define SYNCWORD_DET_SENT_TX_SENT        CC1101_GDO2
 
+#define NUM_OF_REMOTES              (3)
+#define REMOTE_ADDR_LEN             (3)
+#define NUM_OF_BLINDS_PER_REMOTE    (5) // they have 5 ch
+#define BLIND_ADDR_LEN              (3)
+
 static const int spiClk = 500000;
 byte address = 0x00;
 SPIClass * hspi = NULL;
@@ -28,15 +34,69 @@ SPIClass * hspi = NULL;
 static const uint8_t flash_table_encode[] = {0x08, 0x02, 0x0d, 0x01, 0x0f, 0x0e, 0x07, 0x05, 0x09, 0x0c, 0x00, 0x0a, 0x03, 0x04, 0x0b, 0x06};
 static const uint8_t flash_table_decode[] = {0x0a, 0x03, 0x01, 0x0c, 0x0d, 0x07, 0x0f, 0x06, 0x00, 0x08, 0x0b, 0x0e, 0x09, 0x02, 0x05, 0x04};
 
-static uint8_t gIndex = 0x60;
-static uint16_t gCode = (0x00 - (gIndex * 0x708F)) & 0xFFFF;
+static uint8_t  gIndex[3] = {1, 1, 1};
+
+static uint8_t remote_addr[NUM_OF_REMOTES][REMOTE_ADDR_LEN] = {
+        {0x62, 0x0B, 0x0D}, // idx0 = NAPPALI
+        {0x1A, 0x01, 0x0D}, // idx1 = GYSZOBA
+        {0x00, 0x00, 0x00}, // idx2 = HALO
+};
+
+static uint8_t remote_blind_id[NUM_OF_REMOTES][NUM_OF_BLINDS_PER_REMOTE][BLIND_ADDR_LEN] = {
+        { {0xB0, 0xA4, 0x35}, {0xBE, 0xA3, 0x35}, {0x9F, 0xA4, 0x35}, {0xC3, 0xA3, 0x35}, {0x00, 0x00, 0x00} },
+        { {0xC2, 0xA3, 0x35}, {0xDF, 0xAC, 0x2A}, {0x00, 0x00, 0x00}, {0x00, 0x00, 0x00}, {0x00, 0x00, 0x00} },
+        { {0xC6, 0xA3, 0x35}, {0x00, 0x00, 0x00}, {0x00, 0x00, 0x00}, {0x00, 0x00, 0x00}, {0x00, 0x00, 0x00} },
+};
 
 static uint8_t msg_buffer[64];
+static uint8_t remotes[32][3];
 
-static const uint8_t my_remotes[2][3] = {
-        {0x1A, 0x01, 0x0D},
-        {0x62, 0x0B, 0x0D},
-};
+uint8_t scan_check_if_addr_remote(uint8_t* msg)
+{
+    uint8_t all_match = 1;
+
+    if( memcmp(&msg[6], &msg[9], 3) )
+    {
+        all_match = 0;
+    }
+
+    if( memcmp(&msg[6], &msg[12], 3) )
+    {
+        all_match = 0;
+    }
+
+    if( memcmp(&msg[9], &msg[12], 3) )
+    {
+        all_match = 0;
+    }
+
+    return all_match;
+}
+
+void scan_remote_add(uint8_t* msg)
+{
+    uint32_t i;
+    uint8_t empty[3] = {0, 0, 0};
+
+    for( i = 0; i < 32; i++ )
+    {
+        if( (memcmp(&remotes[i][0], empty, 3) == 0) && (memcmp(&remotes[i][0], empty, 3) == 0) && (memcmp(&remotes[i][0], empty, 3) == 0) )
+        {
+            break;
+        }
+
+        if( memcmp(&remotes[i][0], &msg[6], 3) == 0 )
+        {
+            i = 60;
+            break;
+        }
+    }
+
+    if( i < 32 )
+    {
+        memcpy(&remotes[i][0], &msg[6], 3);
+    }
+}
 
 static void print_msg(uint8_t* msg)
 {
@@ -186,8 +246,8 @@ uint8_t calc_exp_parity(uint16_t cnt, uint8_t* msg)
     input_arr[7] = 0;
 
     // overwrite first 2 with the calculated magic from msg cnt/index
-    input_arr[0] = 0; //num >> 8;
-    input_arr[1] = 0; //num & 0xFF;
+    input_arr[0] = num >> 8;
+    input_arr[1] = num & 0xFF;
 
     calc_parity(input_arr);
 
@@ -345,12 +405,28 @@ static void cc1100_tx(uint8_t* msg, uint8_t len)
 {
     uint8_t i;
     uint8_t marcstate;
+    uint32_t ts;
+    uint32_t timeout = 1000;
 
     Serial.print("cc1100_tx...");
 
     Serial.print("waiting for clear channel...");
-    while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
-    Serial.println("cleared");
+    ts = millis();
+
+    //while( (digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW) )
+    while( (digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW) && ((millis()-ts) < timeout) );
+    {
+        delay(5);
+    }
+
+    if( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW )
+    {
+        Serial.println("cleared");
+    }
+    else
+    {
+        //elero_cc1100_init();
+    }
 
     Serial.println("spi transmit start");
     spi_write_burst(0x7F, msg, len);
@@ -363,30 +439,33 @@ static void cc1100_tx(uint8_t* msg, uint8_t len)
 
     Serial.println("cc1100_tx.waiting tx state");
 
-    do
+
+    ts = millis();    do
     {
         marcstate = spi_read_reg(0xF5);
-        delay(1);
+        delay(5);
     }
-    while( marcstate != 0x13 );
+   //while( marcstate != 0x13 );
+    while( (marcstate != 0x13) && ((millis()-ts) < timeout) );
 
     Serial.printf("cc1100_tx.waiting non tx state %x\r\n", marcstate);
 
-    do
+
+    ts = millis();    do
     {
         marcstate = spi_read_reg(0xF5);
-        delay(1);
+        delay(5);
     }
-    while( marcstate == 0x13 );
+    //while( (marcstate == 0x13) );
+    while( (marcstate == 0x13) && ((millis()-ts) < timeout) );
 
     Serial.printf("done %x\r\n", marcstate);
 }
 
 
-static void generate_msg_down(uint8_t* msg, uint8_t index, uint8_t button_pressed)
+static void generate_msg_down(uint8_t* msg, uint8_t* addr, uint8_t index, uint8_t channel, uint8_t button_pressed)
 {
-    uint32_t i;
-    uint8_t* msg_data;
+    uint16_t code;
 
     memset(msg, 0, 28);
 
@@ -396,37 +475,37 @@ static void generate_msg_down(uint8_t* msg, uint8_t index, uint8_t button_presse
     msg[ 3] = 0x10;      // pck_inf2 = STOP
     msg[ 4] = 0x00;      // hop_info = 0
     msg[ 5] = 0x01;      // sys_addr = 1
-    msg[ 6] = 0x11;      // source_group = 0x11
+    msg[ 6] = (channel == 1)?(0x11):(channel);      // source_group = 0x11
 
-    msg[ 7] = 0x1A;        // source addr[0]
-    msg[ 8] = 0x01;        // source addr[1]
-    msg[ 9] = 0x0D;        // source addr[2]
+    msg[ 7] = addr[0];   // source addr[0]
+    msg[ 8] = addr[1];   // source addr[1]
+    msg[ 9] = addr[2];   // source addr[2]
 
-    msg[10] = 0x1A;        // backward addr[0]
-    msg[11] = 0x01;        // backward addr[1]
-    msg[12] = 0x0D;        // backward addr[2]
+    msg[10] = addr[0];   // backward addr[0]
+    msg[11] = addr[1];   // backward addr[1]
+    msg[12] = addr[2];   // backward addr[2]
 
-    msg[13] = 0x1A;        // forward addr[0]
-    msg[14] = 0x01;        // forward addr[1]
-    msg[15] = 0x0D;        // forward addr[2]
+    msg[13] = addr[0];   // forward addr[0]
+    msg[14] = addr[1];   // forward addr[1]
+    msg[15] = addr[2];   // forward addr[2]
 
     msg[16] = 0x01;        // dest_count = 1
-    msg[17] = 0x11;        // dest = TODO        (ch1=0x11(?) ch2=0x02 ch3=0x03 ch4=0x03)
+    msg[17] = (channel == 1)?(0x11):(channel);      // dest = TODO        (ch1=0x11(?) ch2=0x02 ch3=0x03 ch4=0x03)
     msg[18] = 0x00;
     msg[19] = 0x03;
 
-    gCode = (0x00 - (index * 0x708F)) & 0xFFFF;
+    code = (0x00 - (index * 0x708F)) & 0xFFFF;
 
-    msg[20] = (gCode >> 8) & 0xFF;
-    msg[21] = gCode & 0xFF;
+    msg[20] = (code >> 8) & 0xFF;
+    msg[21] = code & 0xFF;
     msg[22] = (button_pressed) ? (0x40) : (0x00);
 
-    msg_encode(&msg[20], (gCode >> 8) & 0xFF, gCode & 0xFF);
+    msg_encode(&msg[20], (code >> 8) & 0xFF, code & 0xFF);
 }
 
-static void generate_msg_stop(uint8_t* msg, uint8_t index, uint8_t button_pressed)
+static void generate_msg_stop(uint8_t* msg, uint8_t* addr, uint8_t index, uint8_t channel, uint8_t* blind_id)
 {
-    uint32_t i;
+    uint16_t code;
 
     memset(msg, 0, 30);
 
@@ -436,235 +515,200 @@ static void generate_msg_stop(uint8_t* msg, uint8_t index, uint8_t button_presse
     msg[ 3] = 0x10;        // pck_inf2 = STOP
     msg[ 4] = 0x00;        // hop_info = 0
     msg[ 5] = 0x01;        // sys_addr = 1
-    msg[ 6] = 0x11;        // source_group = 0x11
+    msg[ 6] = (channel == 1)?(0x11):(channel);      // source_group = 0x11
 
-    msg[ 7] = 0x1A;        // source addr[0]
-    msg[ 8] = 0x01;        // source addr[1]
-    msg[ 9] = 0x0D;        // source addr[2]
+    msg[ 7] = addr[0];   // source addr[0]
+    msg[ 8] = addr[1];   // source addr[1]
+    msg[ 9] = addr[2];   // source addr[2]
 
-    msg[10] = 0x1A;        // backward addr[0]
-    msg[11] = 0x01;        // backward addr[1]
-    msg[12] = 0x0D;        // backward addr[2]
+    msg[10] = addr[0];   // backward addr[0]
+    msg[11] = addr[1];   // backward addr[1]
+    msg[12] = addr[2];   // backward addr[2]
 
-    msg[13] = 0x1A;        // forward addr[0]
-    msg[14] = 0x01;        // forward addr[1]
-    msg[15] = 0x0D;        // forward addr[2]
+    msg[13] = addr[0];   // forward addr[0]
+    msg[14] = addr[1];   // forward addr[1]
+    msg[15] = addr[2];   // forward addr[2]
 
     msg[16] = 0x01;        // dest_count = 1
-    msg[17] = 0xC2;        // dest = TODO
-    msg[18] = 0xA3;
-    msg[19] = 0x35;
+    msg[17] = blind_id[0];        // dest = TODO
+    msg[18] = blind_id[1];
+    msg[19] = blind_id[2];
+
     msg[20] = 0x00;
     msg[21] = 0x03;
 
-    gCode = (0x00 - (index * 0x708F)) & 0xFFFF;
+    code = (0x00 - (index * 0x708F)) & 0xFFFF;
 
-    msg[22] = (gCode >> 8) & 0xFF;
-    msg[23] = gCode & 0xFF;
+    msg[22] = (code >> 8) & 0xFF;
+    msg[23] = code & 0xFF;
     msg[24] = 0x10;
 
-    msg_encode(&msg[22], (gCode >> 8) & 0xFF, gCode & 0xFF);
+    msg_encode(&msg[22], (code >> 8) & 0xFF, code & 0xFF);
 }
 
-static void send_msg_down(void)
+static void generate_msg_up(uint8_t* msg, uint8_t* addr, uint8_t index, uint8_t channel, uint8_t button_pressed)
+{
+    uint16_t code;
+
+    memset(msg, 0, 30);
+
+    msg[ 0] = 0x1B;      // msg_len
+    msg[ 1] = index;     // pck cnt
+    msg[ 2] = 0x44;      // pck_info
+    msg[ 3] = 0x10;  //(index == 0)?(0x12):(0x10);      // pck_inf2
+    msg[ 4] = 0x00;      // hop_info = 0
+    msg[ 5] = 0x01;      // sys_addr = 1
+    msg[ 6] = (channel == 1)?(0x11):(channel);      // source_group = 0x11
+
+    msg[ 7] = addr[0];   // source addr[0]
+    msg[ 8] = addr[1];   // source addr[1]
+    msg[ 9] = addr[2];   // source addr[2]
+
+    msg[10] = addr[0];   // backward addr[0]
+    msg[11] = addr[1];   // backward addr[1]
+    msg[12] = addr[2];   // backward addr[2]
+
+    msg[13] = addr[0];   // forward addr[0]
+    msg[14] = addr[1];   // forward addr[1]
+    msg[15] = addr[2];   // forward addr[2]
+
+    msg[16] = 0x01;        // dest_count = 1
+    msg[17] = (channel == 1)?(0x11):(channel);// dest = TODO
+    msg[18] = 0x00;
+    msg[19] = 0x03;
+
+    code = (0x00 - (index * 0x708F)) & 0xFFFF;
+
+    msg[20] = (code >> 8) & 0xFF;
+    msg[21] = code & 0xFF;
+    msg[22] = (button_pressed) ? (0x20) : (0x00);
+
+    msg_encode(&msg[20], (code >> 8) & 0xFF, code & 0xFF);
+}
+
+void elero_send_msg_down(uint8_t remote_index, uint8_t channel)
 {
     uint8_t i;
+    uint8_t* r_addr = remote_addr[remote_index];
 
-    generate_msg_down(msg_buffer, gIndex, 1);
+    generate_msg_down(msg_buffer, r_addr, gIndex[remote_index], channel, 1);
+    gIndex[remote_index]++;
 
-    gIndex++;
-
-    Serial.println("BUTTON DOWN PRESS msg generated:");
+    Serial.println("BUTTON DOWN -- PRESS msg generated:");
     for( i = 0; i < 28; i++ )
     {
         Serial.printf("0x%02X ", msg_buffer[i]);
     }
-
-    //for( i = 0; i < 3; i++ )
-    {
-        cc1100_tx(msg_buffer, 28);
-
-        delay(10);
-    }
-
-    delay(100);
-
-    generate_msg_down(msg_buffer, gIndex, 0);
-
-    gIndex++;
-
-    Serial.println("BUTTON DOWN -- RELEASE msg generated:");
-    //for( i = 0; i < 28; i++ )
-    {
-        Serial.printf("0x%02X ", msg_buffer[i]);
-    }
+    Serial.println();
 
     for( i = 0; i < 3; i++ )
     {
         cc1100_tx(msg_buffer, 28);
-
         delay(10);
     }
 
     delay(100);
+
+    generate_msg_down(msg_buffer, r_addr, gIndex[remote_index], channel, 0);
+
+    gIndex[remote_index]++;
+
+    Serial.println("BUTTON DOWN -- RELEASE msg generated:");
+    for( i = 0; i < 28; i++ )
+    {
+        Serial.printf("0x%02X ", msg_buffer[i]);
+    }
+    Serial.println();
+
+    for( i = 0; i < 3; i++ )
+    {
+        cc1100_tx(msg_buffer, 28);
+        delay(10);
+    }
 }
 
-void send_msg_stop(void)
+void elero_send_msg_stop(uint8_t remote_index, uint8_t channel)
 {
     uint8_t i;
+    uint8_t* r_addr = remote_addr[remote_index];
+    uint8_t* blind_id = remote_blind_id[remote_index][channel-1];
 
-    generate_msg_stop(msg_buffer, gIndex, 1);
+    generate_msg_stop(msg_buffer, r_addr, gIndex[remote_index], channel, blind_id);
 
-    gIndex++;
+    gIndex[remote_index]++;
 
     Serial.println("BUTTON STOP PRESS msg generated:");
     for( i = 0; i < 30; i++ )
     {
         Serial.printf("0x%02X ", msg_buffer[i]);
     }
+    Serial.println();
 
     cc1100_tx(msg_buffer, 30);
     delay(10);
 
 }
-
-void send_msg_up(void)
+void elero_send_msg_up(uint8_t remote_index, uint8_t channel)
 {
     uint8_t i;
-    uint8_t* msg_data;
+    uint8_t* r_addr = remote_addr[remote_index];
 
-    Serial.print("waiting for clear channel...");
-    while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
-    Serial.println("cleared");
+    generate_msg_up(msg_buffer, r_addr, gIndex[remote_index], channel, 1);
+
+    gIndex[remote_index]++;
 
     Serial.println("UP: button pressed");
-
-    hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(HSPI_CS, LOW);
-
-    hspi->transfer(0x7F);
-    hspi->transfer(0x1B);
-
-    hspi->transfer(gIndex); // pckt
-
-    hspi->transfer(0x44);
-    hspi->transfer(0x12); // reset packet
-    hspi->transfer(0x00);
-    hspi->transfer(0x01);
-    hspi->transfer(0x11);
-
-    hspi->transfer(0x1A);
-    hspi->transfer(0x01);
-    hspi->transfer(0x0D);
-    hspi->transfer(0x1A);
-    hspi->transfer(0x01);
-    hspi->transfer(0x0D);
-    hspi->transfer(0x1A);
-    hspi->transfer(0x01);
-    hspi->transfer(0x0D);
-
-    hspi->transfer(0x01);
-    hspi->transfer(0x11);
-    hspi->transfer(0x00);
-    hspi->transfer(0x03);
-
-    for( i = 0; i < 8; i++ )
+    for( i = 0; i < 28; i++ )
     {
-        hspi->transfer(msg_data[i]);
+        Serial.printf("0x%02X ", msg_buffer[i]);
+    }
+    Serial.println();
+
+    for( i = 0; i < 3; i++ )
+    {
+        cc1100_tx(msg_buffer, 28);
+        delay(10);
     }
 
-    digitalWrite(HSPI_CS, HIGH);
-    hspi->endTransaction();
-
-    delayMicroseconds(10);
-
-    spi_write_cmd(0x35);
-
-    while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
-    while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
-
-
     delay(100);
+
+    generate_msg_up(msg_buffer, r_addr, gIndex[remote_index], channel, 0);
+
+    gIndex[remote_index]++;
 
     Serial.println("UP: button release");
+    for( i = 0; i < 28; i++ )
+    {
+        Serial.printf("0x%02X ", msg_buffer[i]);
+    }
+    Serial.println();
 
-    while( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW );
-
-    hspi->beginTransaction(SPISettings(spiClk, MSBFIRST, SPI_MODE0));
-    digitalWrite(HSPI_CS, LOW);
-
-    hspi->transfer(0x7F);
-    hspi->transfer(0x1B);
-
-    hspi->transfer(0x02);
-
-    hspi->transfer(0x44);
-    hspi->transfer(0x10);
-    hspi->transfer(0x00);
-    hspi->transfer(0x01);
-    hspi->transfer(0x11);
-
-    hspi->transfer(0x1A);
-    hspi->transfer(0x01);
-    hspi->transfer(0x0D);
-    hspi->transfer(0x1A);
-    hspi->transfer(0x01);
-    hspi->transfer(0x0D);
-    hspi->transfer(0x1A);
-    hspi->transfer(0x01);
-    hspi->transfer(0x0D);
-
-    hspi->transfer(0x01);
-    hspi->transfer(0x11);
-    hspi->transfer(0x00);
-    hspi->transfer(0x03);
-
-    hspi->transfer(0xAA);
-    hspi->transfer(0x82);
-    hspi->transfer(0x55);
-    hspi->transfer(0x04);
-    hspi->transfer(0xAA);
-    hspi->transfer(0x72);
-    hspi->transfer(0x66);
-    hspi->transfer(0x0E);
-/*
-    hspi->transfer(0xEE);
-    hspi->transfer(0x7A);
-    hspi->transfer(0xC4);
-    hspi->transfer(0x85);
-    hspi->transfer(0x22);
-    hspi->transfer(0x3A);
-    hspi->transfer(0xEE);
-    hspi->transfer(0xF6);
-*/
-    digitalWrite(HSPI_CS, HIGH);
-    hspi->endTransaction();
-
-    delayMicroseconds(10);
-
-    spi_write_cmd(0x35);
-
-    while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
-    while( spi_read_reg(0xF5) != 0x0D ) delayMicroseconds(10);
+    for( i = 0; i < 3; i++ )
+    {
+        cc1100_tx(msg_buffer, 28);
+        delay(10);
+    }
 }
 
-void setup()
+static void elero_spi_init(void)
 {
-    Serial.begin(460800);
-
-    delay(100);
-
     pinMode(HSPI_CS, OUTPUT);
     digitalWrite(HSPI_CS, HIGH);
 
     pinMode(CC1101_GDO0, INPUT);
     pinMode(CC1101_GDO2, INPUT);
-    pinMode(TEST_INPUT, INPUT_PULLUP);
 
     hspi = new SPIClass(HSPI);
     hspi->begin();
 
     delay(10);
+}
+
+static void elero_cc1100_init()
+{
+    Serial.printf("[cc1100] 0xf0 = %x\r\n", spi_read_reg(0xF0));
+    Serial.printf("[cc1100] 0xf1 = %x\r\n", spi_read_reg(0xF1));
+
 
     spi_write_cmd(0x30); delayMicroseconds(50);
     spi_write_cmd(0x36); delayMicroseconds(50);
@@ -717,12 +761,27 @@ void setup()
     Serial.println("channel cleared");
 }
 
+void setup()
+{
+
+    Serial.begin(921600);
+
+    delay(100);
+
+
+    pinMode(TEST_INPUT, INPUT_PULLUP);
+
+    elero_spi_init();
+    elero_cc1100_init();
+    Serial.println("[elero] inited");
+}
+
 uint8_t sync_det_prev = 0;
 uint8_t rx_fifo[256];
 uint32_t tx;
 uint8_t state;
 
-#define ELERO_MSG_JUST_MY_REMOTES
+//#define ELERO_MSG_JUST_MY_REMOTES
 
 void loop()
 {
@@ -747,6 +806,11 @@ void loop()
                 bytes_in_fifo--,
 
                 spi_read_burst(0xFF, rx_fifo, bytes_in_fifo);
+
+                if( scan_check_if_addr_remote(rx_fifo) )
+                {
+                    scan_remote_add(rx_fifo);
+                }
 
 #ifdef ELERO_MSG_JUST_MY_REMOTES
                 uint8_t myremote = 0;
@@ -890,25 +954,35 @@ void loop()
     {
         if( (millis()-tx) > 2000 )
         {
+            uint8_t remote = 0;
+            uint8_t channel = 1;
             tx = millis();
 
-            send_msg_down();
+            elero_send_msg_down(remote, channel);
 
             delay(2000);
 
-            send_msg_stop();
-            /*
-
-            switch(state)
-            {
-            case 0: send_msg_down(); state = 1; break;
-            case 1: send_msg_stop(); state = 2; break;
-            case 2: send_msg_up();   state = 0; break;
-            default: break;
-            }
-            */
+            elero_send_msg_stop(remote, channel);
         }
     }
+/*
+    static uint32_t remote_disp_ts = 0;
+
+    if( (millis()-remote_disp_ts) >= 2000 )
+    {
+        remote_disp_ts = millis();
+
+        Serial.write(27);       // ESC command
+        Serial.print("[2J");    // clear screen command
+        Serial.write(27);
+        Serial.print("[H");     // cursor to home command
+
+        for( i = 0; i < 32; i++ )
+        {
+            Serial.printf("{0x%02X 0x%02X 0x%02X} \r\n", remotes[i][0], remotes[i][1], remotes[i][2]);
+        }
+    }
+*/
 }
 
 
