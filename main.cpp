@@ -408,8 +408,12 @@ static void cc1100_tx(uint8_t* msg, uint8_t len)
     uint32_t ts;
     uint32_t timeout = 1000;
 
+    spi_write_cmd(0x36); // idle for flushing
+    spi_write_cmd(0x3A); // flush RX fifo
+    spi_write_cmd(0x3B); // flush TX fifo
+    spi_write_cmd(0x34); // back to RX for listening clear channel
+    
     Serial.print("cc1100_tx...");
-
     Serial.print("waiting for clear channel...");
     ts = millis();
 
@@ -419,12 +423,13 @@ static void cc1100_tx(uint8_t* msg, uint8_t len)
         delay(5);
     }
 
-    if( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) == LOW )
+    if( digitalRead(SIGNAL_CLEAR_CHANNEL_ASSESMENT) != LOW )
     {
-        Serial.println("cleared");
+        Serial.printf("cleared %d\r\n", millis()-ts);
     }
     else
     {
+        Serial.printf("TIMEOUT!! %d\r\n", millis()-ts);
         //elero_cc1100_init();
     }
 
@@ -806,6 +811,11 @@ void loop()
                 bytes_in_fifo--,
 
                 spi_read_burst(0xFF, rx_fifo, bytes_in_fifo);
+                
+                spi_write_cmd(0x36); // idle for flushing
+                spi_write_cmd(0x3A); // flush RX fifo
+                spi_write_cmd(0x3B); // flush TX fifo
+                spi_write_cmd(0x34); // back to RX for listening clear channel
 
                 if( scan_check_if_addr_remote(rx_fifo) )
                 {
